@@ -517,7 +517,7 @@ td{padding:7px 12px;border-bottom:1px solid var(--bd);font-size:13px}
 // CONFIG — 請修改以下兩個設定
 // ══════════════════════════════════════════════
 const GAS_URL   = 'https://script.google.com/macros/s/AKfycbytTr5a9YyFDs1q42kUrZ1eQSBO4mdsaiOVtVfMyEufTy0ysQTmZbuQR1HWOcrgHYsa/exec';
-const API_TOKEN = '123456;  // 與 Code.gs 相同
+const API_TOKEN = '123456';  // 與 Code.gs 相同
 
 // ══════════════════════════════════════════════
 // LOGIN SYSTEM
@@ -531,16 +531,50 @@ function doLogin() {
   err.textContent = '';
   if (!u || !p) { err.textContent = '請輸入帳號與密碼'; return; }
 
-  // 取得用戶清單：優先用 S.users（已從 GAS 載入），否則用 localStorage 快取，最後用預設值
   const users = getUsers();
   const found = users.find(x => x.username.toLowerCase() === u);
   if (!found || found.password !== p) {
+    // ★ 若本機 S.users 是預設值（尚未從 GAS 載入），先嘗試從 GAS 載入再比對
+    if (!S.users || S.users.length === 0 || (S.users.length === 1 && S.users[0].username === 'superboss' && !S._loadedFromGAS)) {
+      err.textContent = '正在驗證帳號...';
+      document.getElementById('login-btn') && (document.getElementById('login-btn').disabled = true);
+      fetch(GAS_URL, {
+        method: 'POST',
+        body: JSON.stringify({ action: 'loadAll', token: API_TOKEN })
+      }).then(r => r.json()).then(res => {
+        const data = res.data || res;
+        if (data && data.users) {
+          S.users = data.users;
+          S._loadedFromGAS = true;
+          try { localStorage.setItem('kazpos_cache', JSON.stringify(S)); } catch(e) {}
+        }
+        document.getElementById('login-btn') && (document.getElementById('login-btn').disabled = false);
+        // 重新比對
+        const u2 = document.getElementById('login-user').value.trim().toLowerCase();
+        const p2 = document.getElementById('login-pass').value;
+        const found2 = getUsers().find(x => x.username.toLowerCase() === u2);
+        if (!found2 || found2.password !== p2) {
+          err.textContent = '帳號或密碼錯誤';
+          document.getElementById('login-pass').value = '';
+        } else {
+          _completeLogin(found2);
+        }
+      }).catch(() => {
+        document.getElementById('login-btn') && (document.getElementById('login-btn').disabled = false);
+        err.textContent = '帳號或密碼錯誤（無法連線驗證）';
+        document.getElementById('login-pass').value = '';
+      });
+      return;
+    }
     err.textContent = '帳號或密碼錯誤';
     document.getElementById('login-pass').value = '';
     return;
   }
+  _completeLogin(found);
+}
+
+function _completeLogin(found) {
   currentUser = { username: found.username, role: found.role };
-  // ★ 改用 localStorage 保存 session，重新整理後可還原
   localStorage.setItem('kazpos_session', JSON.stringify(currentUser));
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app').classList.add('ready');
