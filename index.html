@@ -679,6 +679,35 @@ function _loadFromSheets() {
     toast('無法從雲端載入，使用本機快取資料', 4000);
   });
 }
+
+// ── 定時輪詢：每 30 秒從 GAS 拉取最新預訂單和客戶資料 ──
+function _pollHolds(){
+  if (!_gasReady || !currentUser) return;
+  fetch(GAS_URL, {
+    method: 'POST',
+    body: JSON.stringify({ action: 'loadAll', token: API_TOKEN })
+  }).then(r => r.json()).then(res => {
+    const data = res.data || res;
+    if (!data) return;
+    // 找出本機沒有的新 hold
+    const prevIds = new Set(S.holds.map(h => h.id));
+    const newHolds = (data.holds || []).filter(h => !prevIds.has(h.id));
+    if (newHolds.length > 0) {
+      S.holds = [...S.holds, ...newHolds];
+      const pre = newHolds.filter(h => h.sessionId === 'PREORDER');
+      if (pre.length > 0) {
+        toast('📩 新客人預訂 '+pre.length+' 筆！', 4000);
+        renderHoldList();
+        // 如果正在預訂單頁面，重新整理
+        if (document.getElementById('pg-pre').classList.contains('active')) renderHoldList();
+      }
+      try { localStorage.setItem('kazpos_cache', JSON.stringify(S)); } catch(e) {}
+    }
+    // 更新 customers（報表頁面用）
+    if (data.customers) S.customers = data.customers;
+  }).catch(()=>{});
+}
+setInterval(_pollHolds, 30000);
 function updateSyncStatus(state) {
   const el = document.getElementById('sync-status');
   if (!el) return;
@@ -748,7 +777,8 @@ let waitSortKey='seq', preSortKey='time', alertShown=new Set();
 function sessionPrefix(){ return S.curSession ? S.curSession.prefix : 'A'; }
 function orderNo(seq){ return sessionPrefix() + String(seq).padStart(3,'0'); }
 function nextSeq(){
-  const key = TODAY + '_' + sessionPrefix();
+  // ★ 流水號以「每次開店（sessionId）」為單位，從 001 開始，互不影響
+  const key = curSessId() || (TODAY + '_A');
   if (!S.seq[key]) S.seq[key] = 0;
   S.seq[key]++; sv(); return S.seq[key];
 }
@@ -757,7 +787,7 @@ const sorted  = () => [...S.products].sort((a,b)=>a.name.localeCompare(b.name,'z
 const soldT   = p  => (p.sold && p.sold[TODAY]) ? p.sold[TODAY] : 0;
 const avail   = p  => !p.stock || (p.stock - soldT(p)) > 0;
 const todayO  = () => S.orders.filter(o => o.date === TODAY && o.sessionId === curSessId());
-// 預訂單：顯示今日的一般暫存單（同 session）＋所有客人線上預訂（PREORDER）
+// 預訂單：同 session 暫存單 ＋ 所有當日客人線上預訂（PREORDER）
 const todayH  = () => S.holds.filter(h => h.date === TODAY && (h.sessionId === curSessId() || h.sessionId === 'PREORDER'));
 const fmt     = n  => '$' + n.toLocaleString();
 const cartTot = () => Object.keys(cart).reduce((s,pid)=>{const p=S.products.find(x=>x.id===pid);return s+(p?p.price*cart[pid]:0);}, 0);
@@ -873,8 +903,11 @@ function doCheckout(){
   const phone  = document.getElementById('phone-inp').value.replace(/\D/g,'').slice(-3);
   const items  = keys.map(pid=>{const p=S.products.find(x=>x.id===pid);return{pid,name:p.name,price:p.price,qty:cart[pid],sub:p.price*cart[pid]};});
   const chg    = payAmt>0 ? payAmt-tot : 0;
+
+  // 編輯模式
   if (!editOrderId&&window._editOrderIdBackup) editOrderId=window._editOrderIdBackup;
   window._editOrderIdBackup=null;
+
   if (editOrderId){
     const old=S.orders.find(o=>o.id===editOrderId);
     if (old){
@@ -883,19 +916,20 @@ function doCheckout(){
       items.forEach(i=>{const p=S.products.find(x=>x.id===i.pid);if(!p.sold)p.sold={};if(!p.sold[TODAY])p.sold[TODAY]=0;p.sold[TODAY]+=i.qty;});
       sv(); lastOrder=Object.assign({},old);
     }
-    editOrderId=null;
+    editOrderId=null; window._editOrderIdBackup=null;
     document.getElementById('edit-badge').style.display='none';
     document.getElementById('co-btn').textContent='結帳 ';
     document.getElementById('co-btn').appendChild(document.getElementById('edit-badge'));
     document.getElementById('order-seq-display').textContent='尚未結帳';
   } else {
-    let seq,no;
-    if (window._holdNo){no=window._holdNo;seq=window._holdSeq;window._holdNo=null;window._holdSeq=null;window._holdSessionId=null;window._editOrderIdBackup=null;}
-    else{seq=nextSeq();no=orderNo(seq);}
+    // ── 每次結帳都取正式流水號（含從暫存/預訂單來的）──
+    const seq=nextSeq();
+    const no=orderNo(seq);
     const order={id:'o'+Date.now(),no,seq,date:TODAY,sessionId:curSessId(),items,total:tot,paid:payAmt,change:chg,note,pickup,phone,status:'pending',ts:Date.now()};
     S.orders.push(order);
     items.forEach(i=>{const p=S.products.find(x=>x.id===i.pid);if(!p.sold)p.sold={};if(!p.sold[TODAY])p.sold[TODAY]=0;p.sold[TODAY]+=i.qty;});
     sv(); lastOrder=order;
+    window._fromHoldId=null; window._isPreorder=null;
   }
   clearCO(); showRcpt(lastOrder);
   if (btConnected) setTimeout(()=>btPrint(), 400);
@@ -906,18 +940,21 @@ function doHold(){
   if (editOrderId){toast('編輯模式中請按結帳');return;}
   const keys=Object.keys(cart).filter(k=>cart[k]>0);
   if (!keys.length){toast('請先加入商品');return;}
-  const seq=nextSeq(), no=orderNo(seq);
+  // 暫存單不佔用正式流水號，以 HOLD+時間戳 作為暫存識別
+  const tmpId='h'+Date.now();
+  const tmpNo='HOLD-'+String(Date.now()).slice(-4);
   const note=document.getElementById('note-inp').value.trim();
   const pickup=document.getElementById('pickup-inp').value;
   const phone=document.getElementById('phone-inp').value.replace(/\D/g,'').slice(-3);
   const items=keys.map(pid=>{const p=S.products.find(x=>x.id===pid);return{pid,name:p.name,price:p.price,qty:cart[pid],sub:p.price*cart[pid]};});
-  S.holds.push({id:'h'+Date.now(),no,seq,date:TODAY,sessionId:curSessId(),items,total:cartTot(),note,pickup,phone,ts:Date.now(),alertFired:false});
-  sv(); clearCO(); toast('預訂單 '+no+' 已暫存');
+  S.holds.push({id:tmpId,no:tmpNo,seq:0,date:TODAY,sessionId:curSessId(),items,total:cartTot(),note,pickup,phone,ts:Date.now(),alertFired:false,isHold:true});
+  sv(); clearCO(); toast('已暫存（'+tmpNo+'），結帳時取得正式單號');
 }
 
 function clearCO(){
   cart={}; payAmt=0;
-  window._holdNo=null; window._holdSeq=null; window._holdSessionId=null; window._editOrderIdBackup=null;
+  window._holdNo=null; window._holdSeq=null; window._holdSessionId=null;
+  window._editOrderIdBackup=null; window._fromHoldId=null; window._isPreorder=null;
   document.getElementById('pay-disp').textContent='$0';
   document.getElementById('chg-disp').textContent='$0';
   document.getElementById('chg-disp').className='pv';
@@ -1068,10 +1105,13 @@ function checkoutHold(id){
   document.getElementById('note-inp').value=h.note||'';
   document.getElementById('pickup-inp').value=h.pickup||'';
   document.getElementById('phone-inp').value=h.phone||'';
-  window._holdNo=h.no; window._holdSeq=h.seq; window._holdSessionId=h.sessionId;
+  // 記錄來源 hold，結帳時取正式流水號
+  window._fromHoldId=h.id;
+  window._isPreorder=(h.sessionId==='PREORDER');
   S.holds=S.holds.filter(x=>x.id!==id); sv();
-  document.getElementById('order-seq-display').textContent=h.no+' (預訂單)';
-  showPg('order'); renderCart(); toast('已載入預訂單 '+h.no+'，確認後按結帳');
+  const label=h.sessionId==='PREORDER'?'預訂單 '+h.no:'暫存單';
+  document.getElementById('order-seq-display').textContent=label+' → 按結帳取得正式單號';
+  showPg('order'); renderCart(); toast('已載入'+label+'，確認後按結帳');
 }
 
 // ══════════════════════════════════════════════
@@ -1168,7 +1208,6 @@ function delP(id){S.products=S.products.filter(x=>x.id!==id);sv();renderPM();ren
 // ══════════════════════════════════════════════
 function buildDateSel(){
   const sel=document.getElementById('rpt-sel');
-  // 日期來源：所有訂單 ＋ 所有客戶預訂記錄
   const orderDates=S.orders.map(o=>o.date);
   const custDates=(S.customers||[]).map(c=>c.date);
   const dates=[...new Set([...orderDates,...custDates])].sort().reverse();
@@ -1178,57 +1217,81 @@ function buildDateSel(){
 }
 function renderRpt(){
   const date=document.getElementById('rpt-sel').value||TODAY;
+
+  // ── 已結帳訂單統計 ──
   const orders=S.orders.filter(o=>o.date===date&&o.status!=='cancelled');
-  const tot=orders.reduce((s,o)=>s+o.total,0),cnt=orders.length;
+  const tot=orders.reduce((s,o)=>s+o.total,0), cnt=orders.length;
+  // 預訂單（當日所有 PREORDER holds 的預估金額）
+  const preHolds=S.holds.filter(h=>h.date===date&&h.sessionId==='PREORDER');
   document.getElementById('rpt-sg').innerHTML=
-    '<div class="sc"><div class="sv">'+fmt(tot)+'</div><div class="sl">銷售總額</div></div>'
-    +'<div class="sc"><div class="sv">'+cnt+'</div><div class="sl">訂單數</div></div>'
-    +'<div class="sc"><div class="sv">'+fmt(cnt?Math.round(tot/cnt):0)+'</div><div class="sl">平均客單</div></div>';
+    '<div class="sc"><div class="sv">'+fmt(tot)+'</div><div class="sl">已結帳總額</div></div>'
+    +'<div class="sc"><div class="sv">'+cnt+'</div><div class="sl">已結帳訂單</div></div>'
+    +'<div class="sc"><div class="sv">'+preHolds.length+'</div><div class="sl">待處理預訂單</div></div>';
+
+  // ── 商品銷售統計（已結帳） ──
   const map={};
-  orders.forEach(o=>o.items.forEach(i=>{if(!map[i.name])map[i.name]={q:0,a:0};map[i.name].q+=i.qty;map[i.name].a+=i.sub;}));
+  orders.forEach(o=>{
+    // items 從 GAS 回來是陣列物件，確保正確讀取
+    const items=Array.isArray(o.items)?o.items:[];
+    items.forEach(i=>{
+      const nm=i.name||'';const qty=Number(i.qty)||0;const sub=Number(i.sub)||0;
+      if(!map[nm])map[nm]={q:0,a:0};map[nm].q+=qty;map[nm].a+=sub;
+    });
+  });
   const rows=Object.entries(map).sort((a,b)=>b[1].a-a[1].a);
   let phtml='<table><thead><tr><th>商品</th><th>數量</th><th>金額</th><th>佔比</th></tr></thead><tbody>';
   if (!rows.length)phtml+='<tr><td colspan="4" style="text-align:center;color:#999;padding:14px">無資料</td></tr>';
   rows.forEach(([n,v])=>{const pct=tot?Math.round(v.a/tot*100):0;phtml+='<tr><td>'+n+'</td><td>'+v.q+'份</td><td>'+fmt(v.a)+'</td><td>'+pct+'%</td></tr>';});
   phtml+='</tbody></table>';document.getElementById('rpt-prod').innerHTML=phtml;
+
+  // ── 已結帳訂單列表 ──
   let ohtml='<table><thead><tr><th>單號</th><th>時間</th><th>內容</th><th>備註</th><th>手機</th><th>金額</th></tr></thead><tbody>';
-  if (!orders.length)ohtml+='<tr><td colspan="6" style="text-align:center;color:#999;padding:14px">無資料</td></tr>';
-  orders.slice().reverse().forEach(o=>{
-    const d=new Date(o.ts);const ts=d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');
-    const sum=o.items.map(i=>i.name+'x'+i.qty).join('・');
-    ohtml+='<tr><td>'+o.no+'</td><td>'+ts+'</td><td>'+sum+'</td><td>'+(o.note||'')+'</td><td>'+(o.phone||'')+'</td><td>'+fmt(o.total)+'</td></tr>';
+  if (!orders.length)ohtml+='<tr><td colspan="6" style="text-align:center;color:#999;padding:14px">無已結帳訂單</td></tr>';
+  orders.slice().sort((a,b)=>b.ts-a.ts).forEach(o=>{
+    // ts 可能是數字或字串，統一轉數字
+    const tsNum=Number(o.ts)||0;
+    const d=tsNum?new Date(tsNum):new Date();
+    const ts=d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');
+    const items=Array.isArray(o.items)?o.items:[];
+    const sum=items.map(i=>i.name+'x'+(i.qty||1)).join('・');
+    // 確認 no 和 total 欄位正確
+    const no=String(o.no||'—');
+    const total=Number(o.total)||0;
+    ohtml+='<tr><td style="font-weight:700;color:var(--acc)">'+no+'</td><td>'+ts+'</td><td>'+sum+'</td><td>'+(o.note||'')+'</td><td>'+(o.phone||'')+'</td><td style="font-weight:700">'+fmt(total)+'</td></tr>';
   });
   ohtml+='</tbody></table>';document.getElementById('rpt-orders').innerHTML=ohtml;
 
-  // ── 客戶預訂資訊報表 ──
-  // 可選「全部日期」或「指定日期」，日期篩選用訂購日期（date 欄位）
-  const custs = (S.customers||[]).filter(c => c.date === date);
-  const custEl = document.getElementById('rpt-cust');
-  const cntEl  = document.getElementById('rpt-cust-count');
-  if (!custs.length) {
+  // ── 預訂客戶資訊報表 ──
+  const custs=(S.customers||[]).filter(c=>c.date===date);
+  const custEl=document.getElementById('rpt-cust');
+  const cntEl=document.getElementById('rpt-cust-count');
+  if (!custs.length){
     custEl.innerHTML='<div style="text-align:center;color:#999;padding:14px;font-size:13px">此日期無預訂客戶資料</div>';
     cntEl.textContent='';
   } else {
     cntEl.textContent='共 '+custs.length+' 筆';
-    // 依時間新→舊排序
-    const sorted=[...custs].sort((a,b)=>b.ts-a.ts);
+    const sc=[...custs].sort((a,b)=>Number(b.ts)-Number(a.ts));
     let chtml='<table><thead><tr>'
       +'<th>預訂單號</th><th>稱謂</th><th>電子郵件</th><th>手機末3碼</th>'
       +'<th>訂購日期</th><th>取餐時間</th><th>訂購內容</th><th>備註</th><th>金額</th>'
       +'</tr></thead><tbody>';
-    sorted.forEach(c=>{
-      const items = typeof c.items==='string' ? JSON.parse(c.items||'[]') : (c.items||[]);
-      const sum = items.map(i=>i.name+'x'+i.qty).join('・');
+    sc.forEach(c=>{
+      // items 防呆
+      let items=c.items;
+      if (typeof items==='string'){try{items=JSON.parse(items);}catch(e){items=[];}}
+      if (!Array.isArray(items))items=[];
+      const sum=items.map(i=>(i.name||'')+'x'+(i.qty||1)).join('・');
+      const total=Number(c.total)||0;
       chtml+='<tr>'
-        +'<td style="font-weight:700;color:var(--pur)">'+( c.preOrderNo||'—')+'</td>'
-        +'<td>'+( c.name||'—')+'</td>'
-        +'<td style="color:var(--blu)"><a href="mailto:'+( c.email||'')+'">'+( c.email||'—')+'</a></td>'
-        +'<td>'+( c.phone||'—')+'</td>'
-        +'<td>'+( c.date||'—')+'</td>'
-        +'<td>'+( c.pickup||'—')+'</td>'
+        +'<td style="font-weight:700;color:var(--pur)">'+(c.preOrderNo||'—')+'</td>'
+        +'<td>'+(c.name||'—')+'</td>'
+        +'<td style="color:var(--blu)"><a href="mailto:'+(c.email||'')+'">'+( c.email||'—')+'</a></td>'
+        +'<td>'+(c.phone||'—')+'</td>'
+        +'<td>'+(c.date||'—')+'</td>'
+        +'<td>'+(c.pickup||'—')+'</td>'
         +'<td style="max-width:180px;word-break:break-all">'+sum+'</td>'
-        +'<td>'+( c.note||'—')+'</td>'
-        +'<td style="font-weight:700;color:var(--acc)">'+fmt(Number(c.total)||0)+'</td>'
+        +'<td>'+(c.note||'—')+'</td>'
+        +'<td style="font-weight:700;color:var(--acc)">'+fmt(total)+'</td>'
         +'</tr>';
     });
     chtml+='</tbody></table>';
