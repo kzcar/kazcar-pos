@@ -672,14 +672,16 @@ function _loadFromSheets() {
       if (!S.customers) S.customers = [];
       if (S.curSession === undefined) S.curSession = null;
 
-      // ★ 修正所有 date 欄位：若為長格式（含時間），截取前10字元
+      // ★ 修正日期解析：yyyy-MM-dd 不能用 new Date() 直接解析（會被當UTC導致時區偏移）
       const fixDate = d => {
         if (!d) return '';
         const s = String(d).trim();
-        // 已是 yyyy-MM-dd 格式直接回傳
+        // 已是 yyyy-MM-dd 格式直接回傳（不做任何轉換，避免時區問題）
         if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-        // 嘗試解析並重新格式化
-        const dt = new Date(s);
+        // 長格式（含時間）：直接取前10字元
+        if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+        // 其他格式嘗試解析（加 T12:00 避免UTC轉換問題）
+        const dt = new Date(s.includes('T') ? s : s + 'T12:00:00');
         if (!isNaN(dt.getTime())) {
           return dt.getFullYear() + '-' +
             String(dt.getMonth()+1).padStart(2,'0') + '-' +
@@ -845,18 +847,19 @@ function loadCfgFields() {
   document.getElementById('cfg-prewarning').value   = c.preWarning   || '';
 }
 
-// ★ 前端日期格式化工具
+// ★ 前端日期格式化工具（不用 new Date() 解析純日期字串，避免UTC時區偏移）
 function fixDateFE(d) {
   if (!d) return '';
   const s = String(d).trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  const dt = new Date(s);
+  if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const dt = new Date(s.includes('T') ? s : s + 'T12:00:00');
   if (!isNaN(dt.getTime())) {
     return dt.getFullYear() + '-' +
       String(dt.getMonth()+1).padStart(2,'0') + '-' +
       String(dt.getDate()).padStart(2,'0');
   }
-  return s.slice(0,10);
+  return s.slice(0, 10);
 }
 
 // ══════════════════════════════════════════════
