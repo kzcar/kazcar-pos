@@ -755,18 +755,10 @@ function _loadFromSheets() {
         c.ts   = Number(c.ts)||0;
       });
 
-      // ★ 重新計算 curSession
-      // 優先找日期===TODAY的未閉店session；若找不到，找最後一個未閉店session（相容舊資料）
-      const openSess = S.sessions.filter(s => !s.closeTime);
-      const todaySess = openSess.filter(s => s.date === TODAY);
-      if (todaySess.length > 0) {
-        S.curSession = todaySess[todaySess.length - 1];
-      } else if (openSess.length > 0) {
-        // 相容：Sheets 日期欄若因格式問題不等於 TODAY，仍取最後一個未閉店的
+      // ★ 重新計算 curSession（以防 GAS 算的不準）
+      const openSess = S.sessions.filter(s => s.date === TODAY && !s.closeTime);
+      if (openSess.length > 0) {
         S.curSession = openSess[openSess.length - 1];
-        // 同步修正日期為 TODAY
-        S.curSession.date = TODAY;
-        Logger.log && console && console.log('curSession date 修正為 TODAY');
       } else {
         S.curSession = null;
       }
@@ -962,12 +954,9 @@ function curSessId(){ return S.curSession ? S.curSession.id : null; }
 const sorted  = () => [...S.products].sort((a,b)=>a.name.localeCompare(b.name,'zh-Hant'));
 const soldT   = p  => (p.sold && p.sold[TODAY]) ? p.sold[TODAY] : 0;
 const avail   = p  => !p.stock || (p.stock - soldT(p)) > 0;
-const todayO  = () => S.orders.filter(o => o.sessionId === curSessId());
-// 預訂單：同 session 暫存單 ＋ 所有當日客人線上預訂（PREORDER，以 date 比對）
-const todayH  = () => S.holds.filter(h =>
-  (h.sessionId === curSessId()) ||
-  (h.sessionId === 'PREORDER' && (h.date === TODAY || h.date === (S.curSession && S.curSession.date)))
-);
+const todayO  = () => S.orders.filter(o => o.date === TODAY && o.sessionId === curSessId());
+// 預訂單：同 session 暫存單 ＋ 所有當日客人線上預訂（PREORDER）
+const todayH  = () => S.holds.filter(h => h.date === TODAY && (h.sessionId === curSessId() || h.sessionId === 'PREORDER'));
 const fmt     = n  => '$' + n.toLocaleString();
 const cartTot = () => Object.keys(cart).reduce((s,pid)=>{const p=S.products.find(x=>x.id===pid);return s+(p?p.price*cart[pid]:0);}, 0);
 function toast(msg, dur=2400){
