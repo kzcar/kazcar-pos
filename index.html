@@ -740,6 +740,11 @@ function _loadFromSheets() {
           if (m) h.pickup = m[1].padStart(5,'0');
         }
       });
+      // ★ 關鍵：載入後立即過濾掉本裝置已刪除的 hold（含已結帳的 PREORDER）
+      // 這確保即使 saveAll 還沒來得及清掉 Sheets 裡的資料，reload 也不會把它帶回來
+      if (_deletedHoldIds && _deletedHoldIds.size > 0) {
+        S.holds = S.holds.filter(h => !_deletedHoldIds.has(h.id));
+      }
       S.sessions.forEach(s => {
         s.date = fixDate(s.date);
         // ★ closeTime 空字串視為 null
@@ -1273,11 +1278,10 @@ function renderHoldList(){
 }
 function checkoutHold(id){
   const h=S.holds.find(x=>x.id===id);if(!h)return;
-  // ★ 持久化記錄已刪除的 hold ID，防止輪詢後重新載入
+  // ★ 持久化記錄已刪除的 hold ID
   _markHoldDeleted(id);
   cart={}; h.items.forEach(i=>{cart[i.pid]=i.qty;});
   document.getElementById('note-inp').value=h.note||'';
-  // ★ pickup 可能是長格式，只取 HH:MM
   let pickupVal = h.pickup||'';
   if (pickupVal.length > 5) {
     const m = pickupVal.match(/(\d{2}:\d{2})/);
@@ -1287,8 +1291,14 @@ function checkoutHold(id){
   document.getElementById('phone-inp').value=h.phone||'';
   window._fromHoldId=h.id;
   window._isPreorder=(h.sessionId==='PREORDER');
-  window._preOrderOrigNo=h.no; // 保存原預訂單號供參考
-  S.holds=S.holds.filter(x=>x.id!==id); sv();
+  window._preOrderOrigNo=h.no;
+  S.holds=S.holds.filter(x=>x.id!==id);
+  // ★ 立即強制同步到 GAS（不等 debounce），確保 Sheets 馬上清掉這筆 hold
+  try { localStorage.setItem('kazpos_cache', JSON.stringify(S)); } catch(e) {}
+  if (_gasReady) {
+    _saveTimer && clearTimeout(_saveTimer);
+    _saveToSheets();  // 立即執行，不等 500ms
+  }
   const label=h.sessionId==='PREORDER'?'預訂單 '+h.no:'暫存單';
   document.getElementById('order-seq-display').textContent=label+' → 按結帳取得正式單號';
   showPg('order'); renderCart(); toast('已載入'+label+'，確認後按結帳');
