@@ -655,16 +655,18 @@ function _loadFromSheets() {
     body: JSON.stringify({ action: 'loadAll', token: API_TOKEN })
   }).then(r => r.json()).then(res => {
     const data = res.data || res;
-    if (data && data.products && data.products.length > 0) {
+    if (data && data.products) {
+      // ★ 無條件更新：只要 GAS 有回傳就採用，不加 products.length 限制
       S = data;
       if (!S.seq)       S.seq = {};
       if (!S.holds)     S.holds = [];
       if (!S.orders)    S.orders = [];
       if (!S.sessions)  S.sessions = [];
-      if (!S.curSession)S.curSession = null;
       if (!S.users)     S.users = [{ username:'superboss', password:'123456', role:'admin' }];
       if (!S.config)    S.config = {};
       if (!S.customers) S.customers = [];
+      // curSession：GAS 已計算好，但若為 null 也確保欄位存在
+      if (S.curSession === undefined) S.curSession = null;
       try { localStorage.setItem('kazpos_cache', JSON.stringify(S)); } catch(e) {}
     }
     _gasReady = true;
