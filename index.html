@@ -805,11 +805,6 @@ function _pollHolds(){
     const data = res.data || res;
     if (!data || !data.holds) return;
 
-    // ★ 以 GAS 為唯一真相：
-    //   - GAS 有、本機也有 → 保留（正常）
-    //   - GAS 有、本機沒有 → 若不在已刪除集合中才加入（新預訂）
-    //   - GAS 沒有、本機有 → 移除（已被其他裝置結帳）
-
     const fixH = h => {
       h.date = fixDateFE(h.date);
       h.ts   = Number(h.ts)||0;
@@ -821,19 +816,28 @@ function _pollHolds(){
       return h;
     };
 
-    const gasHoldIds  = new Set((data.holds || []).map(h => h.id));
+    const gasHolds = data.holds || [];
+    const gasHoldIds = new Set(gasHolds.map(h => h.id));
     const localHoldIds = new Set(S.holds.map(h => h.id));
 
-    // 1. 移除本機有但 GAS 已不存在的 hold（已被其他裝置結帳）
-    const removed = S.holds.filter(h => !gasHoldIds.has(h.id));
-    if (removed.length > 0) {
-      // 把這些 id 也加入 _deletedHoldIds 避免重複出現
-      removed.forEach(h => _deletedHoldIds.add(h.id));
-      S.holds = S.holds.filter(h => gasHoldIds.has(h.id));
+    // ★ 只有 GAS 回傳有資料時才執行移除（防止 saveAll clearData 期間回傳空表誤刪）
+    // ★ 只移除「POS 自己建的暫存單（sessionId 不是 PREORDER）」且 GAS 已不存在的
+    // ★ PREORDER 不主動移除（由 checkoutHold 的 _markHoldDeleted 控制）
+    let changed = false;
+    if (gasHolds.length > 0) {
+      const removed = S.holds.filter(h =>
+        !gasHoldIds.has(h.id) &&
+        h.sessionId !== 'PREORDER' &&  // PREORDER 不在這裡移除
+        !_deletedHoldIds.has(h.id)     // 已手動刪除的也不管
+      );
+      if (removed.length > 0) {
+        S.holds = S.holds.filter(h => gasHoldIds.has(h.id) || h.sessionId === 'PREORDER' && !_deletedHoldIds.has(h.id));
+        changed = true;
+      }
     }
 
-    // 2. 加入 GAS 有但本機沒有的 hold（新預訂），排除本裝置已刪除的
-    const newHolds = (data.holds || []).filter(h =>
+    // 加入 GAS 有但本機沒有的 hold（新預訂），排除已刪除的
+    const newHolds = gasHolds.filter(h =>
       !localHoldIds.has(h.id) && !_deletedHoldIds.has(h.id)
     ).map(fixH);
 
@@ -842,12 +846,11 @@ function _pollHolds(){
       const pre = newHolds.filter(h => h.sessionId === 'PREORDER');
       if (pre.length > 0) {
         toast('📩 新客人預訂 '+pre.length+' 筆！', 4000);
-        renderHoldList();
       }
+      changed = true;
     }
 
-    // 3. 若有變動就重新整理畫面和快取
-    if (removed.length > 0 || newHolds.length > 0) {
+    if (changed) {
       renderHoldList();
       try { localStorage.setItem('kazpos_cache', JSON.stringify(S)); } catch(e) {}
     }
