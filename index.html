@@ -746,8 +746,17 @@ function _loadFromSheets() {
 }
 
 // ── 定時輪詢：每 30 秒從 GAS 拉取最新預訂單 ──
-// 記錄已被本機結帳/刪除的 hold ID，避免輪詢後重新載入
-const _deletedHoldIds = new Set();
+// ★ 把已刪除的 hold ID 存入 localStorage，重新整理後仍有效
+// ★ 用 try-catch 保護：若 localStorage 資料損壞，不阻斷頁面其他功能
+const _deletedHoldIds = new Set(
+  (function(){ try { return JSON.parse(localStorage.getItem('kazpos_deleted_holds') || '[]'); } catch(e) { return []; } })()
+);
+function _markHoldDeleted(id) {
+  _deletedHoldIds.add(id);
+  // 只保留最近 200 筆，避免無限增長
+  const arr = Array.from(_deletedHoldIds).slice(-200);
+  try { localStorage.setItem('kazpos_deleted_holds', JSON.stringify(arr)); } catch(e) {}
+}
 
 function _pollHolds(){
   if (!_gasReady || !currentUser) return;
@@ -763,12 +772,11 @@ function _pollHolds(){
       !prevIds.has(h.id) && !_deletedHoldIds.has(h.id)
     );
     if (newHolds.length > 0) {
-      // 修正 pickup 格式（Sheets 可能回傳長格式）
       newHolds.forEach(h => {
         h.date = fixDateFE(h.date);
         h.ts   = Number(h.ts)||0;
+        if (h.phone) h.phone = String(h.phone).padStart(3,'0').slice(-3);
         if (h.pickup && h.pickup.length > 5) {
-          // 若是長格式取 HH:MM
           const m = String(h.pickup).match(/(\d{2}:\d{2})/);
           if (m) h.pickup = m[1];
         }
@@ -1207,8 +1215,8 @@ function renderHoldList(){
 }
 function checkoutHold(id){
   const h=S.holds.find(x=>x.id===id);if(!h)return;
-  // ★ 記錄已刪除的 hold ID，防止 _pollHolds 再把它加回來
-  _deletedHoldIds.add(id);
+  // ★ 持久化記錄已刪除的 hold ID，防止輪詢後重新載入
+  _markHoldDeleted(id);
   cart={}; h.items.forEach(i=>{cart[i.pid]=i.qty;});
   document.getElementById('note-inp').value=h.note||'';
   // ★ pickup 可能是長格式，只取 HH:MM
