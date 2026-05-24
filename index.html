@@ -529,7 +529,8 @@ function doLogin() {
   const err = document.getElementById('login-err');
   err.textContent = '';
   if (!u || !p) { err.textContent = '請輸入帳號與密碼'; return; }
-  // Check against stored users
+
+  // 取得用戶清單：優先用 S.users（已從 GAS 載入），否則用 localStorage 快取，最後用預設值
   const users = getUsers();
   const found = users.find(x => x.username.toLowerCase() === u);
   if (!found || found.password !== p) {
@@ -538,17 +539,17 @@ function doLogin() {
     return;
   }
   currentUser = { username: found.username, role: found.role };
-  sessionStorage.setItem('kazpos_user', JSON.stringify(currentUser));
+  // ★ 改用 localStorage 保存 session，重新整理後可還原
+  localStorage.setItem('kazpos_session', JSON.stringify(currentUser));
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app').classList.add('ready');
   document.getElementById('user-label').textContent = found.username + ' 登出';
-  // Show/hide admin features
   document.getElementById('user-mgmt-card').style.display = found.role === 'admin' ? '' : 'none';
   initApp();
 }
 
 function doLogout() {
-  sessionStorage.removeItem('kazpos_user');
+  localStorage.removeItem('kazpos_session');
   currentUser = null;
   document.getElementById('app').classList.remove('ready');
   document.getElementById('login-screen').style.display = 'flex';
@@ -1556,22 +1557,22 @@ function initApp(){
   _loadFromSheets();
 }
 
-// 嘗試自動恢復 session
+// ── 嘗試自動恢復 session（重新整理後免重登） ──
 (function(){
-  const saved=sessionStorage.getItem('kazpos_user');
-  if (saved){
-    try{
-      currentUser=JSON.parse(saved);
-      document.getElementById('login-screen').style.display='none';
+  const saved = localStorage.getItem('kazpos_session');
+  if (saved) {
+    try {
+      currentUser = JSON.parse(saved);
+      document.getElementById('login-screen').style.display = 'none';
       document.getElementById('app').classList.add('ready');
-      document.getElementById('user-label').textContent=currentUser.username+' 登出';
-      document.getElementById('user-mgmt-card').style.display=currentUser.role==='admin'?'':'none';
+      document.getElementById('user-label').textContent = currentUser.username + ' 登出';
+      document.getElementById('user-mgmt-card').style.display = currentUser.role === 'admin' ? '' : 'none';
       initApp();
-    }catch(e){ sessionStorage.removeItem('kazpos_user'); }
-  } else {
-    // 預載資料但不顯示 app
-    // 登入後再 initApp
+    } catch(e) {
+      localStorage.removeItem('kazpos_session');
+    }
   }
+  // 無 session 時不做任何事，顯示登入畫面
 })();
 
 </script>
