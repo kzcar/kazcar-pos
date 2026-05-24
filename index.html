@@ -517,7 +517,7 @@ td{padding:7px 12px;border-bottom:1px solid var(--bd);font-size:13px}
 // CONFIG — 請修改以下兩個設定
 // ══════════════════════════════════════════════
 const GAS_URL   = 'https://script.google.com/macros/s/AKfycbytTr5a9YyFDs1q42kUrZ1eQSBO4mdsaiOVtVfMyEufTy0ysQTmZbuQR1HWOcrgHYsa/exec';
-const API_TOKEN = '123456';  // 與 Code.gs 相同
+const API_TOKEN = '123456;  // 與 Code.gs 相同
 
 // ══════════════════════════════════════════════
 // LOGIN SYSTEM
@@ -746,14 +746,13 @@ function _loadFromSheets() {
 }
 
 // ── 定時輪詢：每 30 秒從 GAS 拉取最新預訂單 ──
-// ★ 把已刪除的 hold ID 存入 localStorage，重新整理後仍有效
-// ★ 用 try-catch 保護：若 localStorage 資料損壞，不阻斷頁面其他功能
+// ★ _deletedHoldIds 僅作為「本裝置本次工作階段」的輔助快取，
+//    真正的同步以 GAS Sheets 為唯一真相
 const _deletedHoldIds = new Set(
   (function(){ try { return JSON.parse(localStorage.getItem('kazpos_deleted_holds') || '[]'); } catch(e) { return []; } })()
 );
 function _markHoldDeleted(id) {
   _deletedHoldIds.add(id);
-  // 只保留最近 200 筆，避免無限增長
   const arr = Array.from(_deletedHoldIds).slice(-200);
   try { localStorage.setItem('kazpos_deleted_holds', JSON.stringify(arr)); } catch(e) {}
 }
@@ -765,30 +764,55 @@ function _pollHolds(){
     body: JSON.stringify({ action: 'loadAll', token: API_TOKEN })
   }).then(r => r.json()).then(res => {
     const data = res.data || res;
-    if (!data) return;
-    const prevIds = new Set(S.holds.map(h => h.id));
-    // ★ 只加入：①本機沒有的 ②且不在已刪除集合中的 新 hold
+    if (!data || !data.holds) return;
+
+    // ★ 以 GAS 為唯一真相：
+    //   - GAS 有、本機也有 → 保留（正常）
+    //   - GAS 有、本機沒有 → 若不在已刪除集合中才加入（新預訂）
+    //   - GAS 沒有、本機有 → 移除（已被其他裝置結帳）
+
+    const fixH = h => {
+      h.date = fixDateFE(h.date);
+      h.ts   = Number(h.ts)||0;
+      if (h.phone) h.phone = String(h.phone).padStart(3,'0').slice(-3);
+      if (h.pickup && h.pickup.length > 5) {
+        const m = String(h.pickup).match(/(\d{2}:\d{2})/);
+        if (m) h.pickup = m[1];
+      }
+      return h;
+    };
+
+    const gasHoldIds  = new Set((data.holds || []).map(h => h.id));
+    const localHoldIds = new Set(S.holds.map(h => h.id));
+
+    // 1. 移除本機有但 GAS 已不存在的 hold（已被其他裝置結帳）
+    const removed = S.holds.filter(h => !gasHoldIds.has(h.id));
+    if (removed.length > 0) {
+      // 把這些 id 也加入 _deletedHoldIds 避免重複出現
+      removed.forEach(h => _deletedHoldIds.add(h.id));
+      S.holds = S.holds.filter(h => gasHoldIds.has(h.id));
+    }
+
+    // 2. 加入 GAS 有但本機沒有的 hold（新預訂），排除本裝置已刪除的
     const newHolds = (data.holds || []).filter(h =>
-      !prevIds.has(h.id) && !_deletedHoldIds.has(h.id)
-    );
+      !localHoldIds.has(h.id) && !_deletedHoldIds.has(h.id)
+    ).map(fixH);
+
     if (newHolds.length > 0) {
-      newHolds.forEach(h => {
-        h.date = fixDateFE(h.date);
-        h.ts   = Number(h.ts)||0;
-        if (h.phone) h.phone = String(h.phone).padStart(3,'0').slice(-3);
-        if (h.pickup && h.pickup.length > 5) {
-          const m = String(h.pickup).match(/(\d{2}:\d{2})/);
-          if (m) h.pickup = m[1];
-        }
-      });
       S.holds = [...S.holds, ...newHolds];
       const pre = newHolds.filter(h => h.sessionId === 'PREORDER');
       if (pre.length > 0) {
         toast('📩 新客人預訂 '+pre.length+' 筆！', 4000);
         renderHoldList();
       }
+    }
+
+    // 3. 若有變動就重新整理畫面和快取
+    if (removed.length > 0 || newHolds.length > 0) {
+      renderHoldList();
       try { localStorage.setItem('kazpos_cache', JSON.stringify(S)); } catch(e) {}
     }
+
     if (data.customers) S.customers = data.customers;
   }).catch(()=>{});
 }
