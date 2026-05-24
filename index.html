@@ -208,6 +208,8 @@ select{padding:8px 12px;border:1.5px solid var(--bd);border-radius:6px;backgroun
 .btn-close{padding:9px 20px;background:var(--red);color:#fff;border-radius:6px;font-size:14px;font-weight:700}
 .sg{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;flex-shrink:0}
 .sc{background:var(--panel);border:1.5px solid var(--bd);border-radius:var(--r);padding:12px;text-align:center}
+#rpt-cust-wrap table{min-width:900px}  /* 客戶表格較寬，允許橫向滾動 */
+.sc{background:var(--panel);border:1.5px solid var(--bd);border-radius:var(--r);padding:12px;text-align:center}
 .sv{font-size:26px;font-weight:700;color:var(--acc)}
 .sl{font-size:11px;color:var(--t3);margin-top:2px;font-weight:500}
 .rpt-tables{display:grid;grid-template-columns:1fr 1fr;gap:8px;flex:1;min-height:0}
@@ -461,6 +463,13 @@ td{padding:7px 12px;border-bottom:1px solid var(--bd);font-size:13px}
         <div class="tbl-ttl">訂單列表</div>
         <div id="rpt-orders"></div>
       </div>
+      <div class="rpt-tbl-wrap" id="rpt-cust-wrap" style="grid-column:1/-1">
+        <div class="tbl-ttl" style="display:flex;align-items:center;justify-content:space-between">
+          <span>📋 預訂客戶資訊</span>
+          <span id="rpt-cust-count" style="font-size:12px;font-weight:400;color:var(--t3)"></span>
+        </div>
+        <div id="rpt-cust"></div>
+      </div>
     </div>
   </div>
 </div><!-- end #app -->
@@ -648,13 +657,14 @@ function _loadFromSheets() {
     const data = res.data || res;
     if (data && data.products && data.products.length > 0) {
       S = data;
-      if (!S.seq)      S.seq = {};
-      if (!S.holds)    S.holds = [];
-      if (!S.orders)   S.orders = [];
-      if (!S.sessions) S.sessions = [];
-      if (!S.curSession) S.curSession = null;
-      if (!S.users)    S.users = [{ username:'superboss', password:'123456', role:'admin' }];
-      if (!S.config)   S.config = {};
+      if (!S.seq)       S.seq = {};
+      if (!S.holds)     S.holds = [];
+      if (!S.orders)    S.orders = [];
+      if (!S.sessions)  S.sessions = [];
+      if (!S.curSession)S.curSession = null;
+      if (!S.users)     S.users = [{ username:'superboss', password:'123456', role:'admin' }];
+      if (!S.config)    S.config = {};
+      if (!S.customers) S.customers = [];
       try { localStorage.setItem('kazpos_cache', JSON.stringify(S)); } catch(e) {}
     }
     _gasReady = true;
@@ -747,7 +757,8 @@ const sorted  = () => [...S.products].sort((a,b)=>a.name.localeCompare(b.name,'z
 const soldT   = p  => (p.sold && p.sold[TODAY]) ? p.sold[TODAY] : 0;
 const avail   = p  => !p.stock || (p.stock - soldT(p)) > 0;
 const todayO  = () => S.orders.filter(o => o.date === TODAY && o.sessionId === curSessId());
-const todayH  = () => S.holds.filter(h  => h.date === TODAY && h.sessionId === curSessId());
+// 預訂單：顯示今日的一般暫存單（同 session）＋所有客人線上預訂（PREORDER）
+const todayH  = () => S.holds.filter(h => h.date === TODAY && (h.sessionId === curSessId() || h.sessionId === 'PREORDER'));
 const fmt     = n  => '$' + n.toLocaleString();
 const cartTot = () => Object.keys(cart).reduce((s,pid)=>{const p=S.products.find(x=>x.id===pid);return s+(p?p.price*cart[pid]:0);}, 0);
 function toast(msg, dur=2400){
@@ -1157,7 +1168,10 @@ function delP(id){S.products=S.products.filter(x=>x.id!==id);sv();renderPM();ren
 // ══════════════════════════════════════════════
 function buildDateSel(){
   const sel=document.getElementById('rpt-sel');
-  const dates=[...new Set(S.orders.map(o=>o.date))].sort().reverse();
+  // 日期來源：所有訂單 ＋ 所有客戶預訂記錄
+  const orderDates=S.orders.map(o=>o.date);
+  const custDates=(S.customers||[]).map(c=>c.date);
+  const dates=[...new Set([...orderDates,...custDates])].sort().reverse();
   if (!dates.includes(TODAY))dates.unshift(TODAY);
   sel.innerHTML='';
   dates.forEach(d=>{const opt=document.createElement('option');opt.value=d;opt.textContent=d+(d===TODAY?' (今日)':'');sel.appendChild(opt);});
@@ -1185,6 +1199,41 @@ function renderRpt(){
     ohtml+='<tr><td>'+o.no+'</td><td>'+ts+'</td><td>'+sum+'</td><td>'+(o.note||'')+'</td><td>'+(o.phone||'')+'</td><td>'+fmt(o.total)+'</td></tr>';
   });
   ohtml+='</tbody></table>';document.getElementById('rpt-orders').innerHTML=ohtml;
+
+  // ── 客戶預訂資訊報表 ──
+  // 可選「全部日期」或「指定日期」，日期篩選用訂購日期（date 欄位）
+  const custs = (S.customers||[]).filter(c => c.date === date);
+  const custEl = document.getElementById('rpt-cust');
+  const cntEl  = document.getElementById('rpt-cust-count');
+  if (!custs.length) {
+    custEl.innerHTML='<div style="text-align:center;color:#999;padding:14px;font-size:13px">此日期無預訂客戶資料</div>';
+    cntEl.textContent='';
+  } else {
+    cntEl.textContent='共 '+custs.length+' 筆';
+    // 依時間新→舊排序
+    const sorted=[...custs].sort((a,b)=>b.ts-a.ts);
+    let chtml='<table><thead><tr>'
+      +'<th>預訂單號</th><th>稱謂</th><th>電子郵件</th><th>手機末3碼</th>'
+      +'<th>訂購日期</th><th>取餐時間</th><th>訂購內容</th><th>備註</th><th>金額</th>'
+      +'</tr></thead><tbody>';
+    sorted.forEach(c=>{
+      const items = typeof c.items==='string' ? JSON.parse(c.items||'[]') : (c.items||[]);
+      const sum = items.map(i=>i.name+'x'+i.qty).join('・');
+      chtml+='<tr>'
+        +'<td style="font-weight:700;color:var(--pur)">'+( c.preOrderNo||'—')+'</td>'
+        +'<td>'+( c.name||'—')+'</td>'
+        +'<td style="color:var(--blu)"><a href="mailto:'+( c.email||'')+'">'+( c.email||'—')+'</a></td>'
+        +'<td>'+( c.phone||'—')+'</td>'
+        +'<td>'+( c.date||'—')+'</td>'
+        +'<td>'+( c.pickup||'—')+'</td>'
+        +'<td style="max-width:180px;word-break:break-all">'+sum+'</td>'
+        +'<td>'+( c.note||'—')+'</td>'
+        +'<td style="font-weight:700;color:var(--acc)">'+fmt(Number(c.total)||0)+'</td>'
+        +'</tr>';
+    });
+    chtml+='</tbody></table>';
+    custEl.innerHTML=chtml;
+  }
 }
 
 // ══════════════════════════════════════════════
