@@ -517,7 +517,7 @@ td{padding:7px 12px;border-bottom:1px solid var(--bd);font-size:13px}
 // CONFIG — 請修改以下兩個設定
 // ══════════════════════════════════════════════
 const GAS_URL   = 'https://script.google.com/macros/s/AKfycbytTr5a9YyFDs1q42kUrZ1eQSBO4mdsaiOVtVfMyEufTy0ysQTmZbuQR1HWOcrgHYsa/exec';
-const API_TOKEN = '123456';  // 與 Code.gs 相同
+const API_TOKEN = 'KazCar2024!';  // 與 Code.gs 相同
 
 // ══════════════════════════════════════════════
 // LOGIN SYSTEM
@@ -755,10 +755,18 @@ function _loadFromSheets() {
         c.ts   = Number(c.ts)||0;
       });
 
-      // ★ 重新計算 curSession（以防 GAS 算的不準）
-      const openSess = S.sessions.filter(s => s.date === TODAY && !s.closeTime);
-      if (openSess.length > 0) {
+      // ★ 重新計算 curSession
+      // 優先找日期===TODAY的未閉店session；若找不到，找最後一個未閉店session（相容舊資料）
+      const openSess = S.sessions.filter(s => !s.closeTime);
+      const todaySess = openSess.filter(s => s.date === TODAY);
+      if (todaySess.length > 0) {
+        S.curSession = todaySess[todaySess.length - 1];
+      } else if (openSess.length > 0) {
+        // 相容：Sheets 日期欄若因格式問題不等於 TODAY，仍取最後一個未閉店的
         S.curSession = openSess[openSess.length - 1];
+        // 同步修正日期為 TODAY
+        S.curSession.date = TODAY;
+        Logger.log && console && console.log('curSession date 修正為 TODAY');
       } else {
         S.curSession = null;
       }
@@ -831,7 +839,10 @@ function _pollHolds(){
         !_deletedHoldIds.has(h.id)     // 已手動刪除的也不管
       );
       if (removed.length > 0) {
-        S.holds = S.holds.filter(h => gasHoldIds.has(h.id) || h.sessionId === 'PREORDER' && !_deletedHoldIds.has(h.id));
+        S.holds = S.holds.filter(h =>
+          gasHoldIds.has(h.id) ||
+          (h.sessionId === 'PREORDER' && !_deletedHoldIds.has(h.id))
+        );
         changed = true;
       }
     }
@@ -873,15 +884,15 @@ function updateSyncStatus(state) {
 let S = ld();
 if (!S.products) {
   S.products = [
-    {id:'p1',name:'02甜甜圈',price:40,stock:0,sold:{}},
-    {id:'p2',name:'01甜甜圈分享組',price:110,stock:0,sold:{}},
-    {id:'p3',name:'09原味鮮脆薯',price:60,stock:0,sold:{}},
-    {id:'p4',name:'05蒜蒜鮮脆薯',price:60,stock:0,sold:{}},
-    {id:'p5',name:'04海苔鮮脆薯',price:60,stock:0,sold:{}},
-    {id:'p6',name:'06蜂蜜芥末鮮脆薯',price:60,stock:0,sold:{}},
-    {id:'p7',name:'07塔塔鮮脆薯',price:60,stock:0,sold:{}},
-    {id:'p8',name:'03雙起司鮮脆薯',price:60,stock:0,sold:{}},
-    {id:'p9',name:'08番茄鮮脆薯',price:60,stock:0,sold:{}},
+    {id:'p1',name:'甜甜圈',price:50,stock:50,sold:{}},
+    {id:'p2',name:'甜甜圈分享組',price:180,stock:20,sold:{}},
+    {id:'p3',name:'原味鮮脆薯',price:60,stock:40,sold:{}},
+    {id:'p4',name:'蒜蒜鮮脆薯',price:65,stock:40,sold:{}},
+    {id:'p5',name:'海苔鮮脆薯',price:65,stock:40,sold:{}},
+    {id:'p6',name:'蜂蜜芥末鮮脆薯',price:70,stock:40,sold:{}},
+    {id:'p7',name:'塔塔鮮脆薯',price:70,stock:40,sold:{}},
+    {id:'p8',name:'雙起司鮮脆薯',price:75,stock:30,sold:{}},
+    {id:'p9',name:'番茄鮮脆薯',price:65,stock:40,sold:{}},
   ];
   S.orders = []; S.holds = []; S.seq = {}; S.sessions = []; S.curSession = null;
   S.users = [{ username:'superboss', password:'123456', role:'admin' }];
@@ -954,9 +965,12 @@ function curSessId(){ return S.curSession ? S.curSession.id : null; }
 const sorted  = () => [...S.products].sort((a,b)=>a.name.localeCompare(b.name,'zh-Hant'));
 const soldT   = p  => (p.sold && p.sold[TODAY]) ? p.sold[TODAY] : 0;
 const avail   = p  => !p.stock || (p.stock - soldT(p)) > 0;
-const todayO  = () => S.orders.filter(o => o.date === TODAY && o.sessionId === curSessId());
-// 預訂單：同 session 暫存單 ＋ 所有當日客人線上預訂（PREORDER）
-const todayH  = () => S.holds.filter(h => h.date === TODAY && (h.sessionId === curSessId() || h.sessionId === 'PREORDER'));
+const todayO  = () => S.orders.filter(o => o.sessionId === curSessId());
+// 預訂單：同 session 暫存單 ＋ 所有當日客人線上預訂（PREORDER，以 date 比對）
+const todayH  = () => S.holds.filter(h =>
+  (h.sessionId === curSessId()) ||
+  (h.sessionId === 'PREORDER' && (h.date === TODAY || h.date === (S.curSession && S.curSession.date)))
+);
 const fmt     = n  => '$' + n.toLocaleString();
 const cartTot = () => Object.keys(cart).reduce((s,pid)=>{const p=S.products.find(x=>x.id===pid);return s+(p?p.price*cart[pid]:0);}, 0);
 function toast(msg, dur=2400){
@@ -1401,12 +1415,15 @@ function delP(id){S.products=S.products.filter(x=>x.id!==id);sv();renderPM();ren
 // ══════════════════════════════════════════════
 function buildDateSel(){
   const sel=document.getElementById('rpt-sel');
-  // ★ 只收集符合 yyyy-MM-dd 格式的日期，過濾掉長格式字串
   const isValidDate = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d||'').trim());
-  const orderDates=S.orders.map(o=>o.date).filter(isValidDate);
-  const custDates=(S.customers||[]).map(c=>c.date).filter(isValidDate);
-  const dates=[...new Set([...orderDates,...custDates])].sort().reverse();
+
+  // ★ 日期來源優先用 sessions（最可靠），再補 orders 和 customers
+  const sessDates = S.sessions.map(s => s.date).filter(isValidDate);
+  const orderDates = S.orders.map(o => o.date).filter(isValidDate);
+  const custDates  = (S.customers||[]).map(c => c.date).filter(isValidDate);
+  const dates = [...new Set([...sessDates, ...orderDates, ...custDates])].sort().reverse();
   if (!dates.includes(TODAY)) dates.unshift(TODAY);
+
   sel.innerHTML='';
   dates.forEach(d=>{
     const opt=document.createElement('option');
@@ -1418,10 +1435,16 @@ function buildDateSel(){
 function renderRpt(){
   const date=document.getElementById('rpt-sel').value||TODAY;
 
-  // ── 已結帳訂單統計 ──
-  const orders=S.orders.filter(o=>o.date===date&&o.status!=='cancelled');
+  // ★ 取得當天的 sessionIds（一天可能有多個 session）
+  const dateSessions = S.sessions.filter(s => s.date === date).map(s => s.id);
+  const dateSessSet  = new Set(dateSessions);
+
+  // ★ 訂單篩選：date 比對 OR sessionId 比對（相容 date 欄時區偏移的情況）
+  const orders = S.orders.filter(o =>
+    o.status !== 'cancelled' &&
+    (o.date === date || dateSessSet.has(o.sessionId))
+  );
   const tot=orders.reduce((s,o)=>s+o.total,0), cnt=orders.length;
-  // 預訂單（當日所有 PREORDER holds 的預估金額）
   const preHolds=S.holds.filter(h=>h.date===date&&h.sessionId==='PREORDER');
   document.getElementById('rpt-sg').innerHTML=
     '<div class="sc"><div class="sv">'+fmt(tot)+'</div><div class="sl">已結帳總額</div></div>'
