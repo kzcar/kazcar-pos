@@ -688,8 +688,22 @@ function _loadFromSheets() {
         return s.slice(0, 10);
       };
 
-      S.orders.forEach(o => { o.date = fixDate(o.date); o.ts = Number(o.ts)||0; });
-      S.holds.forEach(h  => { h.date = fixDate(h.date);  h.ts = Number(h.ts)||0; });
+      S.orders.forEach(o => {
+        o.date  = fixDate(o.date);
+        o.ts    = Number(o.ts)||0;
+        // ★ phone 補前導0
+        if (o.phone) o.phone = String(o.phone).padStart(3,'0').slice(-3);
+      });
+      S.holds.forEach(h => {
+        h.date  = fixDate(h.date);
+        h.ts    = Number(h.ts)||0;
+        if (h.phone) h.phone = String(h.phone).padStart(3,'0').slice(-3);
+        // ★ pickup 若是長格式只取 HH:MM
+        if (h.pickup && h.pickup.length > 5) {
+          const m = h.pickup.match(/(\d{1,2}:\d{2})/);
+          if (m) h.pickup = m[1].padStart(5,'0');
+        }
+      });
       S.sessions.forEach(s => {
         s.date = fixDate(s.date);
         // ★ closeTime 空字串視為 null
@@ -709,6 +723,12 @@ function _loadFromSheets() {
       }
 
       try { localStorage.setItem('kazpos_cache', JSON.stringify(S)); } catch(e) {}
+    }
+    // ★ 前端也做 orders 去重（以 id 為 key，保留最後一筆，防止本機快取與 GAS 資料合併時重複）
+    if (S.orders && S.orders.length) {
+      const oMap = {};
+      S.orders.forEach(o => { if (o.id) oMap[o.id] = o; });
+      S.orders = Object.values(oMap);
     }
     _gasReady = true;
     updateSyncStatus('ok');
@@ -1369,26 +1389,21 @@ function renderRpt(){
   } else {
     cntEl.textContent='共 '+custs.length+' 筆';
     const sc=[...custs].sort((a,b)=>Number(b.ts)-Number(a.ts));
+    // ★ 問題5：只保留稱謂、電子郵件、手機末三碼、訂購日期、金額
     let chtml='<table><thead><tr>'
-      +'<th>預訂單號</th><th>稱謂</th><th>電子郵件</th><th>手機末3碼</th>'
-      +'<th>訂購日期</th><th>取餐時間</th><th>訂購內容</th><th>備註</th><th>金額</th>'
+      +'<th>稱謂</th>'
+      +'<th>電子郵件</th>'
+      +'<th>手機末3碼</th>'
+      +'<th>訂購日期</th>'
+      +'<th>金額</th>'
       +'</tr></thead><tbody>';
     sc.forEach(c=>{
-      // items 防呆
-      let items=c.items;
-      if (typeof items==='string'){try{items=JSON.parse(items);}catch(e){items=[];}}
-      if (!Array.isArray(items))items=[];
-      const sum=items.map(i=>(i.name||'')+'x'+(i.qty||1)).join('・');
       const total=Number(c.total)||0;
       chtml+='<tr>'
-        +'<td style="font-weight:700;color:var(--pur)">'+(c.preOrderNo||'—')+'</td>'
         +'<td>'+(c.name||'—')+'</td>'
         +'<td style="color:var(--blu)"><a href="mailto:'+(c.email||'')+'">'+( c.email||'—')+'</a></td>'
         +'<td>'+(c.phone||'—')+'</td>'
         +'<td>'+(c.date||'—')+'</td>'
-        +'<td>'+(c.pickup||'—')+'</td>'
-        +'<td style="max-width:180px;word-break:break-all">'+sum+'</td>'
-        +'<td>'+(c.note||'—')+'</td>'
         +'<td style="font-weight:700;color:var(--acc)">'+fmt(total)+'</td>'
         +'</tr>';
     });
