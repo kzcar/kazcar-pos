@@ -627,7 +627,11 @@ function delUser(name) {
 // ══════════════════════════════════════════════
 // GAS STORAGE LAYER
 // ══════════════════════════════════════════════
-const TODAY = new Date().toISOString().slice(0, 10);
+// ★ TODAY 統一用 zh-TW Intl 格式化確保本地時區正確
+const _now = new Date();
+const TODAY = _now.getFullYear() + '-' +
+  String(_now.getMonth()+1).padStart(2,'0') + '-' +
+  String(_now.getDate()).padStart(2,'0');
 document.getElementById('nav-date').textContent = '營業日：' + TODAY;
 
 let _saveTimer = null, _gasReady = false;
@@ -657,7 +661,6 @@ function _loadFromSheets() {
   }).then(r => r.json()).then(res => {
     const data = res.data || res;
     if (data && data.products) {
-      // ★ 無條件更新：只要 GAS 有回傳就採用，不加 products.length 限制
       S = data;
       if (!S.seq)       S.seq = {};
       if (!S.holds)     S.holds = [];
@@ -666,8 +669,44 @@ function _loadFromSheets() {
       if (!S.users)     S.users = [{ username:'superboss', password:'123456', role:'admin' }];
       if (!S.config)    S.config = {};
       if (!S.customers) S.customers = [];
-      // curSession：GAS 已計算好，但若為 null 也確保欄位存在
       if (S.curSession === undefined) S.curSession = null;
+
+      // ★ 修正所有 date 欄位：若為長格式（含時間），截取前10字元
+      const fixDate = d => {
+        if (!d) return '';
+        const s = String(d).trim();
+        // 已是 yyyy-MM-dd 格式直接回傳
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+        // 嘗試解析並重新格式化
+        const dt = new Date(s);
+        if (!isNaN(dt.getTime())) {
+          return dt.getFullYear() + '-' +
+            String(dt.getMonth()+1).padStart(2,'0') + '-' +
+            String(dt.getDate()).padStart(2,'0');
+        }
+        return s.slice(0, 10);
+      };
+
+      S.orders.forEach(o => { o.date = fixDate(o.date); o.ts = Number(o.ts)||0; });
+      S.holds.forEach(h  => { h.date = fixDate(h.date);  h.ts = Number(h.ts)||0; });
+      S.sessions.forEach(s => {
+        s.date = fixDate(s.date);
+        // ★ closeTime 空字串視為 null
+        if (!s.closeTime || s.closeTime.trim() === '') s.closeTime = null;
+      });
+      S.customers.forEach(c => {
+        c.date = fixDate(c.date);
+        c.ts   = Number(c.ts)||0;
+      });
+
+      // ★ 重新計算 curSession（以防 GAS 算的不準）
+      const openSess = S.sessions.filter(s => s.date === TODAY && !s.closeTime);
+      if (openSess.length > 0) {
+        S.curSession = openSess[openSess.length - 1];
+      } else {
+        S.curSession = null;
+      }
+
       try { localStorage.setItem('kazpos_cache', JSON.stringify(S)); } catch(e) {}
     }
     _gasReady = true;
@@ -1211,12 +1250,19 @@ function delP(id){S.products=S.products.filter(x=>x.id!==id);sv();renderPM();ren
 // ══════════════════════════════════════════════
 function buildDateSel(){
   const sel=document.getElementById('rpt-sel');
-  const orderDates=S.orders.map(o=>o.date);
-  const custDates=(S.customers||[]).map(c=>c.date);
+  // ★ 只收集符合 yyyy-MM-dd 格式的日期，過濾掉長格式字串
+  const isValidDate = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d||'').trim());
+  const orderDates=S.orders.map(o=>o.date).filter(isValidDate);
+  const custDates=(S.customers||[]).map(c=>c.date).filter(isValidDate);
   const dates=[...new Set([...orderDates,...custDates])].sort().reverse();
-  if (!dates.includes(TODAY))dates.unshift(TODAY);
+  if (!dates.includes(TODAY)) dates.unshift(TODAY);
   sel.innerHTML='';
-  dates.forEach(d=>{const opt=document.createElement('option');opt.value=d;opt.textContent=d+(d===TODAY?' (今日)':'');sel.appendChild(opt);});
+  dates.forEach(d=>{
+    const opt=document.createElement('option');
+    opt.value=d;
+    opt.textContent=d+(d===TODAY?' (今日)':'');
+    sel.appendChild(opt);
+  });
 }
 function renderRpt(){
   const date=document.getElementById('rpt-sel').value||TODAY;
