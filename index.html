@@ -410,8 +410,9 @@ td{padding:7px 12px;border-bottom:1px solid var(--bd);font-size:13px}
           <div class="card-ttl">系統設定</div>
           <div class="fg"><label>商家名稱</label><input id="cfg-storename" placeholder="咔滋餐車"></div>
           <div class="fg"><label>收據標題</label><input id="cfg-receipttitle" placeholder="Kaz! Car Receipt"></div>
-          <div class="fg"><label>收據感謝語</label><input id="cfg-thanks" placeholder="Thank you!"></div>
+          <div class="fg"><label>收據感謝語</label><input id="cfg-thanks" placeholder="謝謝您的光臨！"></div>
           <div class="fg"><label>備註欄位提示詞（客戶預訂頁面）</label><input id="cfg-notehint" placeholder="如有特殊需求請備註..."></div>
+          <div class="fg"><label>預訂收據取餐提醒（客人收到的郵件中顯示）</label><textarea id="cfg-prewarning" rows="3" placeholder="請準時到店取餐&#10;取餐時請向店員出示預訂單號&#10;餐點費用請於現場結帳付款，線上預訂不收款" style="padding:9px 11px;border:1.5px solid var(--bd);border-radius:6px;font-size:13px;resize:vertical;background:var(--panel2)"></textarea></div>
           <button class="btn-pri" onclick="saveCfg()">儲存設定</button>
         </div>
         <!-- Password change -->
@@ -722,7 +723,10 @@ function _loadFromSheets() {
   });
 }
 
-// ── 定時輪詢：每 30 秒從 GAS 拉取最新預訂單和客戶資料 ──
+// ── 定時輪詢：每 30 秒從 GAS 拉取最新預訂單 ──
+// 記錄已被本機結帳/刪除的 hold ID，避免輪詢後重新載入
+const _deletedHoldIds = new Set();
+
 function _pollHolds(){
   if (!_gasReady || !currentUser) return;
   fetch(GAS_URL, {
@@ -731,21 +735,30 @@ function _pollHolds(){
   }).then(r => r.json()).then(res => {
     const data = res.data || res;
     if (!data) return;
-    // 找出本機沒有的新 hold
     const prevIds = new Set(S.holds.map(h => h.id));
-    const newHolds = (data.holds || []).filter(h => !prevIds.has(h.id));
+    // ★ 只加入：①本機沒有的 ②且不在已刪除集合中的 新 hold
+    const newHolds = (data.holds || []).filter(h =>
+      !prevIds.has(h.id) && !_deletedHoldIds.has(h.id)
+    );
     if (newHolds.length > 0) {
+      // 修正 pickup 格式（Sheets 可能回傳長格式）
+      newHolds.forEach(h => {
+        h.date = fixDateFE(h.date);
+        h.ts   = Number(h.ts)||0;
+        if (h.pickup && h.pickup.length > 5) {
+          // 若是長格式取 HH:MM
+          const m = String(h.pickup).match(/(\d{2}:\d{2})/);
+          if (m) h.pickup = m[1];
+        }
+      });
       S.holds = [...S.holds, ...newHolds];
       const pre = newHolds.filter(h => h.sessionId === 'PREORDER');
       if (pre.length > 0) {
         toast('📩 新客人預訂 '+pre.length+' 筆！', 4000);
         renderHoldList();
-        // 如果正在預訂單頁面，重新整理
-        if (document.getElementById('pg-pre').classList.contains('active')) renderHoldList();
       }
       try { localStorage.setItem('kazpos_cache', JSON.stringify(S)); } catch(e) {}
     }
-    // 更新 customers（報表頁面用）
     if (data.customers) S.customers = data.customers;
   }).catch(()=>{});
 }
@@ -798,6 +811,7 @@ function saveCfg() {
     receiptTitle: document.getElementById('cfg-receipttitle').value.trim() || 'Kaz! Car Receipt',
     thanks:       document.getElementById('cfg-thanks').value.trim()       || '謝謝您的光臨！',
     noteHint:     document.getElementById('cfg-notehint').value.trim()     || '如有特殊需求請備註...',
+    preWarning:   document.getElementById('cfg-prewarning').value.trim()   || '',
   };
   sv(); applyConfig(); toast('設定已儲存 ✓');
 }
@@ -808,6 +822,21 @@ function loadCfgFields() {
   document.getElementById('cfg-receipttitle').value = c.receiptTitle || '';
   document.getElementById('cfg-thanks').value       = c.thanks       || '';
   document.getElementById('cfg-notehint').value     = c.noteHint     || '';
+  document.getElementById('cfg-prewarning').value   = c.preWarning   || '';
+}
+
+// ★ 前端日期格式化工具
+function fixDateFE(d) {
+  if (!d) return '';
+  const s = String(d).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const dt = new Date(s);
+  if (!isNaN(dt.getTime())) {
+    return dt.getFullYear() + '-' +
+      String(dt.getMonth()+1).padStart(2,'0') + '-' +
+      String(dt.getDate()).padStart(2,'0');
+  }
+  return s.slice(0,10);
 }
 
 // ══════════════════════════════════════════════
@@ -971,7 +1000,19 @@ function doCheckout(){
     S.orders.push(order);
     items.forEach(i=>{const p=S.products.find(x=>x.id===i.pid);if(!p.sold)p.sold={};if(!p.sold[TODAY])p.sold[TODAY]=0;p.sold[TODAY]+=i.qty;});
     sv(); lastOrder=order;
-    window._fromHoldId=null; window._isPreorder=null;
+    // ★ 問題3：若來自 PREORDER，異步更新 GAS Customers 表中的預訂單號為正式流水號
+    if (window._isPreorder && window._preOrderOrigNo) {
+      const oldNo = window._preOrderOrigNo;
+      const newNo = no;
+      // 更新本機 customers 中的 preOrderNo
+      (S.customers||[]).forEach(c => { if (c.preOrderNo === oldNo) c.preOrderNo = newNo; });
+      // 異步同步到 GAS（不阻塞結帳流程）
+      fetch(GAS_URL, {
+        method: 'POST',
+        body: JSON.stringify({ action:'updatePreOrderNo', token:API_TOKEN, data:{ oldNo, newNo } })
+      }).catch(()=>{});
+    }
+    window._fromHoldId=null; window._isPreorder=null; window._preOrderOrigNo=null;
   }
   clearCO(); showRcpt(lastOrder);
   if (btConnected) setTimeout(()=>btPrint(), 400);
@@ -1143,13 +1184,21 @@ function renderHoldList(){
 }
 function checkoutHold(id){
   const h=S.holds.find(x=>x.id===id);if(!h)return;
+  // ★ 記錄已刪除的 hold ID，防止 _pollHolds 再把它加回來
+  _deletedHoldIds.add(id);
   cart={}; h.items.forEach(i=>{cart[i.pid]=i.qty;});
   document.getElementById('note-inp').value=h.note||'';
-  document.getElementById('pickup-inp').value=h.pickup||'';
+  // ★ pickup 可能是長格式，只取 HH:MM
+  let pickupVal = h.pickup||'';
+  if (pickupVal.length > 5) {
+    const m = pickupVal.match(/(\d{2}:\d{2})/);
+    if (m) pickupVal = m[1];
+  }
+  document.getElementById('pickup-inp').value=pickupVal;
   document.getElementById('phone-inp').value=h.phone||'';
-  // 記錄來源 hold，結帳時取正式流水號
   window._fromHoldId=h.id;
   window._isPreorder=(h.sessionId==='PREORDER');
+  window._preOrderOrigNo=h.no; // 保存原預訂單號供參考
   S.holds=S.holds.filter(x=>x.id!==id); sv();
   const label=h.sessionId==='PREORDER'?'預訂單 '+h.no:'暫存單';
   document.getElementById('order-seq-display').textContent=label+' → 按結帳取得正式單號';
